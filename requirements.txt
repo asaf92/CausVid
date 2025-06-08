@@ -31,3 +31,4 @@ matplotlib
 sentencepiece
 pydantic
 scikit-image
+sageattention

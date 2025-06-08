@@ -13,10 +13,17 @@ try:
 except ModuleNotFoundError:
     FLASH_ATTN_2_AVAILABLE = False
 
+try:
+    from sageattention import sageattn, sageattn_varlen
+    SAGE_ATTN_AVAILABLE = True
+except ModuleNotFoundError:
+    SAGE_ATTN_AVAILABLE = False
+
 import warnings
 
 __all__ = [
     'flash_attention',
+    'sage_attention',
     'attention',
 ]
 
@@ -128,6 +135,67 @@ def flash_attention(
     return x.type(out_dtype)
 
 
+def sage_attention(
+    q,
+    k,
+    v,
+    q_lens=None,
+    k_lens=None,
+    dropout_p=0.,
+    softmax_scale=None,
+    q_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    deterministic=False,
+    dtype=torch.bfloat16,
+    version=None,
+):
+    """Sage attention wrapper using ``sageattention``.
+
+    Arguments follow :func:`flash_attention` except for ``window_size`` and
+    ``dropout_p`` which are currently unsupported.
+    """
+    assert dropout_p == 0, 'dropout is not supported in sage attention.'
+    assert window_size == (-1, -1), 'window attention is not supported.'
+
+    half_dtypes = (torch.float16, torch.bfloat16)
+    assert dtype in half_dtypes
+    assert q.device.type == 'cuda' and q.size(-1) <= 256
+
+    b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
+
+    def half(x):
+        return x if x.dtype in half_dtypes else x.to(dtype)
+
+    if q_lens is None:
+        q_lens = torch.tensor([lq] * b, dtype=torch.int32, device=q.device)
+        k_lens = torch.tensor([lk] * b, dtype=torch.int32, device=k.device)
+
+    q = half(torch.cat([u[:v] for u, v in zip(q, q_lens)]))
+    k = half(torch.cat([u[:v] for u, v in zip(k, k_lens)]))
+    v = half(torch.cat([u[:v] for u, v in zip(v, k_lens)]))
+
+    q = q.to(v.dtype)
+    k = k.to(v.dtype)
+
+    cu_q = torch.cat([q_lens.new_zeros(1), q_lens]).cumsum(0, dtype=torch.int32)
+    cu_k = torch.cat([k_lens.new_zeros(1), k_lens]).cumsum(0, dtype=torch.int32)
+
+    x = sageattn_varlen(
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_q,
+        cu_seqlens_k=cu_k,
+        max_seqlen_q=lq,
+        max_seqlen_k=lk,
+        is_causal=causal,
+        sm_scale=softmax_scale,
+    ).unflatten(0, (b, lq))
+
+    return x.type(out_dtype)
+
+
 def attention(
     q,
     k,
@@ -143,7 +211,22 @@ def attention(
     dtype=torch.bfloat16,
     fa_version=None,
 ):
-    if FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
+    if fa_version == 'sage' and SAGE_ATTN_AVAILABLE:
+        return sage_attention(
+            q=q,
+            k=k,
+            v=v,
+            q_lens=q_lens,
+            k_lens=k_lens,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            q_scale=q_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic,
+            dtype=dtype,
+        )
+    if (FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE) and fa_version != 'sage':
         return flash_attention(
             q=q,
             k=k,
@@ -158,6 +241,21 @@ def attention(
             deterministic=deterministic,
             dtype=dtype,
             version=fa_version,
+        )
+    elif SAGE_ATTN_AVAILABLE:
+        return sage_attention(
+            q=q,
+            k=k,
+            v=v,
+            q_lens=q_lens,
+            k_lens=k_lens,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            q_scale=q_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic,
+            dtype=dtype,
         )
     else:
         if q_lens is not None or k_lens is not None:
