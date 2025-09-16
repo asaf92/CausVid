@@ -22,8 +22,9 @@ Current video diffusion models achieve impressive generation quality but struggl
 ```bash
 conda create -n causvid python=3.10 -y
 conda activate causvid
-pip install torch torchvision 
-pip install -r requirements.txt 
+pip install torch torchvision
+pip install -r requirements.txt
+pip install sageattention  # optional for faster attention
 python setup.py develop
 ```
 
